@@ -1,0 +1,168 @@
+# AI AGENT FIREWALL - ENTERPRISE POLICY-AS-CODE SCHEMA
+# Owner: Michael (Security Ops & GRC Architecture)
+# Consumers: agent-firewall-core, SIEM log enricher, compliance_audit.py
+schema_version: "1.1.0"
+policy_id: "pol-ent-mcp-prod-001"
+last_updated: "2026-10-24T22:50:00Z"
+
+engine:
+  enforcement_mode: "enforcing"
+  default_action: "allow"
+  hot_reload:
+    enabled: true
+    watch_interval_ms: 1000
+  jit_elevation:
+    tty_device: "/dev/tty"
+    timeout_seconds: 60
+    timeout_action: "block"
+    prompt_banner: "[AI-AGENT-FIREWALL] High-risk MCP tool call intercepted."
+    headless_ci_fallback:
+      enabled: true
+      env_flag: "AGENT_FIREWALL_CI_MODE"
+      on_taint_rule: "allow"
+      on_standard_rule: "block"
+  telemetry:
+    log_path: "/var/log/agent-firewall/events.json"
+    async_flush: true
+    include_arguments: true
+    redact_patterns:
+      - "(?i)(api[_-]?key|secret|token|password)\\s*[:=]\\s*['\"]?[a-zA-Z0-9_\\-]{8,}['\"]?"
+
+taint_policy:
+  enabled: true
+  session_ttl_seconds: 3600
+  tainted_sinks:
+    - sink_id: "SINK-NET-001"
+      name: "Block Outbound Network Egress on Tainted Session"
+      description: "Prevents multi-turn secret exfiltration over HTTP/network tools after reading sensitive files."
+      tool_regex: "^(curl|wget|http_request|fetch|websocket_send|mcp_http_.*)$"
+      arg_regex: ".*"
+      action: "block"
+      severity: "critical"
+      wazuh_rule_level: 13
+      telemetry_tags:
+        mitre_atlas_technique: "AML.T0024"
+        owasp_llm: "LLM02:2025-Sensitive-Information-Disclosure"
+      compliance:
+        iso_27001_2022: ["A.8.20", "A.5.15"]
+        soc2_type2: ["CC6.6", "CC6.1"]
+        nist_ai_rmf: ["GOVERN-1.2", "MEASURE-2.6"]
+        eu_ai_act: ["Article-15"]
+    - sink_id: "SINK-EXEC-002"
+      name: "Block Subshell Execution on Tainted Session"
+      description: "Prevents tainted sessions from spawning shell processes to exfiltrate data via DNS, netcat, or base64 pipes."
+      tool_regex: "^(bash|sh|zsh|exec|run_command|execute_command|terminal)$"
+      arg_regex: ".*"
+      action: "block"
+      severity: "critical"
+      wazuh_rule_level: 13
+      telemetry_tags:
+        mitre_atlas_technique: "AML.T0024"
+        owasp_llm: "LLM06:2025-Excessive-Agency"
+      compliance:
+        iso_27001_2022: ["A.8.20", "A.5.15"]
+        soc2_type2: ["CC6.6"]
+        nist_ai_rmf: ["MEASURE-2.6"]
+        eu_ai_act: ["Article-15"]
+
+rules:
+  - rule_id: "RULE-CRYPTO-001"
+    priority: 10
+    name: "Block Access to Private Cryptographic Keys & Cloud Credentials"
+    description: "Strictly prohibits reading, listing, or modifying SSH keys, TLS certificates, and cloud provider credential stores."
+    enabled: true
+    match:
+      tool_regex: "^(read_file|get_file_contents|cat|head|tail|view_file|write_file|edit_file|bash|sh)$"
+      arg_regex: "(?i)(^|/|\\\\)(id_rsa|id_ed25519|id_ecdsa|id_dsa|.*\\.pem|.*\\.key|.*\\.pfx|.*\\.p12|\\.aws/credentials|\\.kube/config|\\.gcp/credentials\\.json)$"
+    action: "block"
+    taint_session: true
+    severity: "high"
+    wazuh_rule_level: 10
+    telemetry_tags:
+      mitre_atlas_technique: "AML.T0055"
+      owasp_llm: "LLM02:2025-Sensitive-Information-Disclosure"
+    compliance:
+      iso_27001_2022: ["A.8.24", "A.5.15"]
+      soc2_type2: ["CC6.1"]
+      nist_ai_rmf: ["GOVERN-1.2", "MEASURE-2.6"]
+      eu_ai_act: ["Article-15"]
+  - rule_id: "RULE-ENV-002"
+    priority: 20
+    name: "Step-Up & Taint Session on Environment Configuration Read"
+    description: "Prompts developer via /dev/tty before reading .env or secret configs (auto-allows in CI taint tests) and immediately marks the session as tainted."
+    enabled: true
+    match:
+      tool_regex: "^(read_file|get_file_contents|cat|head|tail|view_file|search_files|grep)$"
+      arg_regex: "(?i)(^|/|\\\\)(\\.env(\\.[a-zA-Z0-9_\\-]+)?|secrets\\.ya?ml|vault\\.json|\\.npmrc|\\.pypirc|\\.docker/config\\.json)$"
+    action: "step_up"
+    taint_session: true
+    severity: "high"
+    wazuh_rule_level: 10
+    telemetry_tags:
+      mitre_atlas_technique: "AML.T0055"
+      owasp_llm: "LLM02:2025-Sensitive-Information-Disclosure"
+    compliance:
+      iso_27001_2022: ["A.5.15", "A.8.24"]
+      soc2_type2: ["CC6.1"]
+      nist_ai_rmf: ["MEASURE-2.6"]
+      eu_ai_act: ["Article-14", "Article-15"]
+  - rule_id: "RULE-IPI-003"
+    priority: 30
+    name: "Block Modification of Agent Rules, Git Hooks, and Firewall Configs"
+    description: "Prevents indirect prompt injection payloads from persisting backdoors in git hooks, IDE agent instructions, or firewall policies."
+    enabled: true
+    match:
+      tool_regex: "^(write_file|edit_file|create_file|patch_file|move_file|delete_file|bash|sh)$"
+      arg_regex: "(?i)(^|/|\\\\)(\\.git/hooks/.*|\\.cursorrules|\\.clinerules|CLAUDE\\.md|\\.github/workflows/.*|configs/policy\\.ya?ml)$"
+    action: "block"
+    taint_session: true
+    severity: "critical"
+    wazuh_rule_level: 13
+    telemetry_tags:
+      mitre_atlas_technique: "AML.T0051.001"
+      owasp_llm: "LLM01:2025-Prompt-Injection"
+    compliance:
+      iso_27001_2022: ["A.5.15", "A.8.20"]
+      soc2_type2: ["CC6.1", "CC6.6"]
+      nist_ai_rmf: ["GOVERN-1.2", "MEASURE-2.6"]
+      eu_ai_act: ["Article-15"]
+  - rule_id: "RULE-JIT-004"
+    priority: 40
+    name: "Step-Up Authentication for Destructive or Privileged Shell Commands"
+    description: "Pauses stdio stream and prompts developer via /dev/tty [ALLOW / DENY] when the agent attempts privileged, destructive, or package-install operations."
+    enabled: true
+    match:
+      tool_regex: "^(bash|sh|zsh|exec|run_command|execute_command|terminal)$"
+      arg_regex: "(?i)\\b(sudo|su|chmod\\s+777|chown|rm\\s+-[rRf]+|mkfs|dd\\s+if=|iptables|ufw|nc|netcat|ncat|scp|rsync|ssh|npm\\s+publish|pip\\s+install|cargo\\s+install)\\b"
+    action: "step_up"
+    taint_session: false
+    severity: "high"
+    wazuh_rule_level: 10
+    telemetry_tags:
+      mitre_atlas_technique: "AML.T0040"
+      owasp_llm: "LLM06:2025-Excessive-Agency"
+    compliance:
+      iso_27001_2022: ["A.5.15"]
+      soc2_type2: ["CC6.1"]
+      nist_ai_rmf: ["GOVERN-1.2"]
+      eu_ai_act: ["Article-14"]
+  - rule_id: "RULE-NET-005"
+    priority: 50
+    name: "Step-Up Authentication for Untainted External Network Calls"
+    description: "Requires developer confirmation on /dev/tty before an untainted agent session connects to external URLs or APIs."
+    enabled: true
+    match:
+      tool_regex: "^(curl|wget|http_request|fetch|mcp_http_.*)$"
+      arg_regex: "(?i)https?://(?!localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0).*"
+    action: "step_up"
+    taint_session: false
+    severity: "medium"
+    wazuh_rule_level: 10
+    telemetry_tags:
+      mitre_atlas_technique: "AML.T0024"
+      owasp_llm: "LLM06:2025-Excessive-Agency"
+    compliance:
+      iso_27001_2022: ["A.8.20"]
+      soc2_type2: ["CC6.6"]
+      nist_ai_rmf: ["GOVERN-1.2", "MEASURE-2.6"]
+      eu_ai_act: ["Article-14"]
